@@ -1,116 +1,165 @@
-def extract_form16a_data_final(pdf_file):
+import streamlit as st
+import pdfplumber
+import pandas as pd
+import re
+from io import BytesIO
+
+# --- Page Configuration and UI Styling ---
+st.set_page_config(page_title="Form 16A TDS Extractor", layout="centered")
+
+st.markdown("""
+    <style>
+    body, .stApp {
+        background-color: #0f0f0f;
+        color: #00ff88;
+        font-family: 'Segoe UI', sans-serif;
+    }
+    .stButton>button, .stDownloadButton>button {
+        background-color: #00ff88;
+        color: black;
+        font-weight: bold;
+        border-radius: 8px;
+    }
+    footer {visibility: hidden;}
+    </style>
+""", unsafe_allow_html=True)
+
+st.title("📄 Form 16A TDS Data Extractor")
+st.info("Upload a merged PDF containing one or more Form 16A certificates. The extractor will read all transactions and generate a downloadable Excel file.")
+
+# --- Core Extraction Logic ---
+def extract_data_from_pdf(pdf_file):
     """
-    Extracts TDS data from a merged PDF containing multiple Form 16A certificates.
-    
-    This function dynamically identifies each certificate, handles data spanning
-    multiple pages, and correctly associates payment amounts with TDS deposited
-    by using table structures and serial numbers.
-    
-    This version includes safety checks to prevent AttributeErrors during regex matching.
+    Extracts TDS data from a merged PDF of Form 16A certificates.
+    This version is stabilized to prevent crashes and correctly parse table data.
     """
-    all_records = []
-    with pdfplumber.open(pdf_file) as pdf:
-        # Step 1: Find the start page of each Form 16A certificate
-        start_page_indices = []
-        for i, page in enumerate(pdf.pages):
-            text = page.extract_text(x_tolerance=2) or ""
-            # Use a unique combination of text to identify the start of a new certificate
-            if "Certificate under section 203" in text and "FORM NO. 16A" in text:
-                start_page_indices.append(i)
+    all_final_records = []
+    
+    try:
+        with pdfplumber.open(pdf_file) as pdf:
+            # Step 1: Find the start page of each Form 16A certificate
+            start_page_indices = [i for i, page in enumerate(pdf.pages) if "Certificate under section 203" in (page.extract_text() or "") and "FORM NO. 16A" in (page.extract_text() or "")]
 
-        if not start_page_indices:
-            st.error("Could not find any valid Form 16A start pages. Please check the PDF.")
-            return pd.DataFrame()
+            if not start_page_indices:
+                st.error("Error: No valid Form 16A start pages were found in the document.")
+                return pd.DataFrame()
 
-        # Step 2: Process each certificate as a "block" of pages
-        for i, start_index in enumerate(start_page_indices):
-            end_index = start_page_indices[i + 1] if i + 1 < len(start_page_indices) else len(pdf.pages)
-            
-            # --- A. Extract Header Information (with safety checks) ---
-            header_page = pdf.pages[start_index]
-            header_text = header_page.extract_text(x_tolerance=2, y_tolerance=3) or ""
-            
-            # Safely extract Deductor Name
-            deductor_match = re.search(r"Name and address of the deductor\n(.*?)\n", header_text) or re.search(r"Name and address of the deductor\s*(.*?)\s*PAN", header_text)
-            deductor_name = deductor_match.group(1).strip() if deductor_match else "Unknown Deductor"
-
-            # Safely extract Deductee Name
-            deductee_match = re.search(r"Name and address of the deductee\n(.*?)\n", header_text) or re.search(r"Name and address of the deductee\s*(.*?)\s*Assessment Year", header_text)
-            deductee_name = deductee_match.group(1).strip() if deductee_match else "Unknown Deductee"
-
-            # Safely extract PAN
-            pan_match = re.search(r"PAN of the deductee\s*\n\s*([A-Z]{5}[0-9]{4}[A-Z])", header_text) or re.search(r"PAN of the deductee\s*([A-Z]{5}[0-9]{4}[A-Z])", header_text)
-            pan = pan_match.group(1) if pan_match else "Unknown PAN"
-
-            # Safely extract Quarter
-            quarter_match = re.search(r"Quarter\s*\n\s*(Q[1-4]|0[1-4])", header_text) or re.search(r"Period\s*\nFrom\s*To\s*\n\d{2}-\w{3}-\d{4}\s*\d{2}-\w{3}-\d{4}\s*(Q[1-4])", header_text)
-            quarter = f"Q{quarter_match.group(1).lstrip('0')}" if quarter_match else "Unknown Quarter"
-
-
-            # --- B. Extract Transactional Data from all pages in the block ---
-            payments_dict = {}
-            challans_dict = {}
-
-            for page_num in range(start_index, end_index):
-                page = pdf.pages[page_num]
-                # Enhanced table settings for better parsing
-                tables = page.extract_tables({
-                    "vertical_strategy": "lines",
-                    "horizontal_strategy": "text",
-                    "keep_blank_chars": True
-                })
-
-                for table in tables:
-                    if not table or not table[0]: continue
-                    # Clean up header text by removing None and joining
-                    header_row_text = ' '.join(filter(None, table[0])).replace('\n', ' ')
-
-                    # Identify and process "Summary of payment" table
-                    if "Amount paid/credited" in header_row_text and "Date of payment/credit" in header_row_text:
-                        for row in table[1:]:
-                            try:
-                                sl_no = row[0].strip() if row[0] else ""
-                                amount_str = row[1].strip() if row[1] else "0"
-                                date_str = row[4].strip() if row[4] else ""
-                                if sl_no.isdigit():
-                                    payments_dict[sl_no] = {
-                                        'amount_paid': float(amount_str.replace(',', '')),
-                                        'payment_date': date_str
-                                    }
-                            except (ValueError, IndexError):
-                                continue # Skip malformed rows
-
-                    # Identify and process "Details of tax deducted... through challan" table
-                    if "Tax deposited in respect" in header_row_text and "BSR Code" in header_row_text:
-                        for row in table[1:]:
-                             try:
-                                sl_no = row[0].strip() if row[0] else ""
-                                tax_val_str = row[1].strip() if row[1] else "0"
-                                if sl_no.isdigit():
-                                    challans_dict[sl_no] = {
-                                        'tds_amount': float(tax_val_str.replace(',', ''))
-                                    }
-                             except (ValueError, IndexError):
-                                 continue # Skip malformed rows
-            
-            # --- C. Merge payment and challan data and create final records ---
-            for sl_no, payment_info in payments_dict.items():
-                challan_info = challans_dict.get(sl_no, {'tds_amount': 0.0}) # Default to 0 if no matching challan
+            # Step 2: Process each certificate as a "block" of pages
+            for i, start_index in enumerate(start_page_indices):
+                end_index = start_page_indices[i + 1] if i + 1 < len(start_page_indices) else len(pdf.pages)
                 
-                try:
-                    rate = round((challan_info['tds_amount'] / payment_info['amount_paid']) * 100, 2) if payment_info['amount_paid'] > 0 else 0.0
-                except ZeroDivisionError:
-                    rate = 0.0
+                header_page = pdf.pages[start_index]
+                header_text = header_page.extract_text(x_tolerance=2, y_tolerance=3) or ""
                 
-                all_records.append({
-                    "Quarter": quarter,
-                    "Date of Deduction": payment_info['payment_date'],
-                    "Deductee Name": deductee_name,
-                    "PAN": pan,
-                    "Taxable Value": payment_info['amount_paid'],
-                    "Rate (%)": f"{rate:.2f}",
-                    "TDS Amount": challan_info['tds_amount'],
-                    "Deductor Name": deductor_name
-                })
+                # --- Section A: Safely extract all header info ONCE per certificate ---
+                deductor_match = re.search(r"Name and address of the deductor\n(.*?)\n", header_text)
+                deductor_name = deductor_match.group(1).strip() if deductor_match else "Unknown Deductor"
+                
+                deductee_match = re.search(r"Name and address of the deductee\n(.*?)\n", header_text)
+                deductee_name = deductee_match.group(1).strip() if deductee_match else "Unknown Deductee"
 
-    return pd.DataFrame(all_records)
+                pan_match = re.search(r"PAN of the deductee\s*\n\s*([A-Z]{5}[0-9]{4}[A-Z])", header_text)
+                pan = pan_match.group(1).strip() if pan_match else "Unknown PAN"
+                
+                quarter_match = re.search(r"Quarter\s*\n\s*(Q[1-4]|0[1-4])", header_text)
+                quarter = f"Q{quarter_match.group(1).lstrip('0')}" if quarter_match else "N/A"
+
+                # --- Section B: Extract transaction data from all pages in the block ---
+                payments = {}
+                challans = {}
+
+                for page_num in range(start_index, end_index):
+                    page = pdf.pages[page_num]
+                    tables = page.extract_tables() # Use simplified, robust default extraction
+
+                    for table in tables:
+                        if not table or not table[0]: continue
+                        header = ' '.join(filter(None, table[0])).replace('\n', ' ')
+
+                        # Look for payment table
+                        if "Amount paid/credited" in header:
+                            for row in table[1:]:
+                                try:
+                                    if row and len(row) > 4 and row[0] and row[0].strip().isdigit():
+                                        sl_no = row[0].strip()
+                                        payments[sl_no] = {
+                                            'amount_paid': float(str(row[1]).replace(',', '')),
+                                            'payment_date': str(row[4])
+                                        }
+                                except (ValueError, TypeError):
+                                    continue
+                        
+                        # Look for challan (TDS) table
+                        if "Tax deposited in respect" in header and "BSR Code" in header:
+                             for row in table[1:]:
+                                 try:
+                                    if row and len(row) > 1 and row[0] and row[0].strip().isdigit():
+                                        sl_no = row[0].strip()
+                                        challans[sl_no] = {
+                                            'tds_amount': float(str(row[1]).replace(',', ''))
+                                        }
+                                 except (ValueError, TypeError):
+                                     continue
+                
+                # --- Section C: Merge and store records for this certificate ---
+                for sl_no, payment_data in payments.items():
+                    challan_data = challans.get(sl_no, {'tds_amount': 0.0})
+                    
+                    try:
+                        rate = round((challan_data['tds_amount'] / payment_data['amount_paid']) * 100, 2) if payment_data['amount_paid'] else 0.0
+                    except ZeroDivisionError:
+                        rate = 0.0
+                    
+                    all_final_records.append({
+                        "Quarter": quarter,
+                        "Date of Deduction": payment_data['payment_date'],
+                        "Deductee Name": deductee_name,
+                        "PAN": pan,
+                        "Taxable Value": payment_data['amount_paid'],
+                        "Rate (%)": f"{rate:.2f}",
+                        "TDS Amount": challan_data['tds_amount'],
+                        "Deductor Name": deductor_name
+                    })
+
+    except Exception as e:
+        st.error(f"An unexpected error occurred during PDF processing: {e}")
+        return pd.DataFrame()
+        
+    return pd.DataFrame(all_final_records)
+
+
+# --- Main Application Flow ---
+uploaded_file = st.file_uploader(" ", type="pdf")
+
+if uploaded_file is not None:
+    if st.button("▶️ Extract TDS Data"):
+        with st.spinner("Analyzing document and extracting all transactions..."):
+            extracted_df = extract_data_from_pdf(uploaded_file)
+
+        if not extracted_df.empty:
+            st.success(f"✅ Extraction Complete! Found {len(extracted_df)} records.")
+            
+            # Display formatted DataFrame
+            st.dataframe(extracted_df.style.format({
+                "Taxable Value": "₹{:,.2f}",
+                "TDS Amount": "₹{:,.2f}"
+            }))
+
+            # Prepare data for download
+            @st.cache_data
+            def convert_df_to_excel(df):
+                buffer = BytesIO()
+                df.to_excel(buffer, index=False, sheet_name='TDS_Extracted_Data')
+                return buffer.getvalue()
+
+            excel_data = convert_df_to_excel(extracted_df)
+
+            st.download_button(
+                label="📥 Download as Excel File",
+                data=excel_data,
+                file_name="Form16A_TDS_Extracted.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            # This message will show if the function runs but finds nothing
+            st.warning("Extraction ran successfully, but no valid transaction data was found. Please check if the PDF is a standard Form 16A.")
