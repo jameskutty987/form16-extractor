@@ -44,7 +44,8 @@ st.title("Form 16A TDS Extractor")
 # --- 2. Core Extraction Logic ---
 def extract_data_final(pdf_file):
     """
-    Final extractor using a hybrid of original logic and robust page handling.
+    Final extractor using a hybrid of original logic and robust page handling,
+    with corrected TDS extraction logic for all pages.
     """
     all_records = []
     
@@ -65,10 +66,7 @@ def extract_data_final(pdf_file):
                 words1 = page1.extract_words(x_tolerance=2)
                 text1 = page1.extract_text(x_tolerance=2) or ""
 
-                current_pan = "Unknown"
-                current_deductee = "Unknown"
-                current_deductor = "Unknown"
-                quarter = "Unknown"
+                current_pan, current_deductee, current_deductor, quarter = "Unknown", "Unknown", "Unknown", "Unknown"
 
                 # Your original coordinate logic for PAN
                 for w in words1:
@@ -94,9 +92,10 @@ def extract_data_final(pdf_file):
                 if quarter_match:
                     quarter = f"Q{quarter_match.group(1)}"
 
-                # --- Transaction Extraction (using your original TDS regex) ---
+                # --- Transaction Extraction for Page 1---
                 payments1 = re.findall(r"(\d{2,}\.\d{2})\s+194\w+\s+(\d{2}-\d{2}-\d{4})", text1)
-                challans1 = re.findall(r"(\d{2,}\.\d{2})\s+051\d+\s+(\d{2}-\d{2}-\d{4})", text1)
+                # Using the more robust TDS regex that previously worked for all pages
+                challans1 = re.findall(r"(\d+\.\d{2})\s+\d{7}\s+(\d{2}-\d{2}-\d{4})", text1)
                 
                 for j in range(min(len(payments1), len(challans1))):
                     taxable_val, pay_date = payments1[j]
@@ -113,11 +112,19 @@ def extract_data_final(pdf_file):
                     page2 = pdf.pages[start_index + 1]
                     text2 = page2.extract_text() or ""
                     
-                    payments2 = re.findall(r"(\d{2,}\.\d{2})\s+194\w+\s+(\d{2}-\d{2}-\d{4})", text2)
-                    challans2 = re.findall(r"(\d{2,}\.\d{2})\s+051\d+\s+(\d{2}-\d{2}-\d{4})", text2)
+                    # Page 2 often only contains the challan (TDS) table continuation.
+                    # We will find all challans on this page and pair them with remaining payments if any,
+                    # or log them even if payment details are not on the same page.
                     
-                    for j in range(min(len(payments2), len(challans2))):
-                        taxable_val, pay_date = payments2[j]
+                    # Using the robust TDS regex for Page 2
+                    challans2 = re.findall(r"(\d+\.\d{2})\s+\d{7}\s+(\d{2}-\d{2}-\d{4})", text2)
+
+                    # For simplicity and accuracy, we assume challans on page 2 correspond to later payments
+                    # We will match the found challans to the remaining payments from page 1
+                    remaining_payments = payments1[len(challans1):]
+                    
+                    for j in range(min(len(remaining_payments), len(challans2))):
+                        taxable_val, pay_date = remaining_payments[j]
                         tds_val, _ = challans2[j]
                         rate = round((float(tds_val) / float(taxable_val)) * 100, 2) if float(taxable_val) > 0 else 0.0
                         all_records.append({
@@ -148,7 +155,6 @@ if uploaded_file is not None:
                 "TDS Amount": "₹{:,.2f}"
             }))
 
-            # Use st.cache_data for efficient download preparation
             @st.cache_data
             def convert_df_to_excel(df):
                 buffer = BytesIO()
