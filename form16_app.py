@@ -24,15 +24,13 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("📄 Form 16A TDS Extractor (Coordinate-Based)")
-st.warning("This version uses hardcoded coordinates for extraction, tailored to the specific format of your PDF.")
+st.title("📄 Form 16A TDS Extractor (Original Logic)")
+st.info("This extractor uses the original coordinate-based logic to ensure data is correctly associated across pages.")
 
-
-def extract_data_with_coordinates(pdf_file):
+def extract_data_with_original_logic(pdf_file):
     """
-    Final extractor using coordinate-based logic as requested.
-    It finds each certificate and then uses fixed coordinates and simple regex
-    to pull data from all pages of that certificate.
+    Final extractor using the user's original coordinate-based logic for Page 1
+    and extending it to Page 2, ensuring header data is carried over correctly.
     """
     all_records = []
     
@@ -49,72 +47,73 @@ def extract_data_with_coordinates(pdf_file):
             for i, start_index in enumerate(start_page_indices):
                 end_index = start_page_indices[i + 1] if i + 1 < len(start_page_indices) else len(pdf.pages)
                 
-                # --- Section A: Extract Header Info from the First Page using Coordinate Logic ---
-                header_page = pdf.pages[start_index]
-                header_words = header_page.extract_words(x_tolerance=2)
-                header_text = header_page.extract_text(x_tolerance=2)
-                
-                current_pan = "Unknown PAN"
-                current_deductee = "Unknown Deductee"
-                current_deductor = "Unknown Deductor"
-                
-                # Using the exact coordinate logic from your first script for PAN
-                for w in header_words:
-                    if 280 < w["top"] < 295 and 350 < w["x0"] < 500 and re.fullmatch(r"[A-Z]{5}[0-9]{4}[A-Z]", w["text"]):
+                # --- PROCESS PAGE 1 ---
+                page1 = pdf.pages[start_index]
+                words1 = page1.extract_words(x_tolerance=2)
+                text1 = page1.extract_text(x_tolerance=2) or ""
+
+                # Initialize variables for header info for this certificate
+                current_pan = "Unknown"
+                current_deductee = "Unknown"
+                current_deductor = "Unknown"
+                quarter = "Unknown"
+
+                # --- Using your EXACT original coordinates for PAN ---
+                for w in words1:
+                    # NOTE: Using the coordinates from your first script
+                    if 265 < w["top"] < 275 and 455 < w["x0"] < 510 and re.fullmatch(r"[A-Z]{5}[0-9]{4}[A-Z]", w["text"]):
                         current_pan = w["text"]
                         break
                 
-                # Using a coordinate band for Deductee Name
-                name_words = [w["text"] for w in header_words if 220 < w["top"] < 240 and 20 < w["x0"] < 300]
-                if name_words:
-                    current_deductee = " ".join(name_words)
+                # --- Using your EXACT original coordinates for Deductee Name ---
+                name_band = [w for w in words1 if 185 < w["top"] < 195 and 300 < w["x0"] < 540]
+                if name_band:
+                    # Sort words by their horizontal position (x0) to form the name correctly
+                    name_band_sorted = sorted(name_band, key=lambda x: x["x0"])
+                    combined_name = " ".join([w["text"] for w in name_band_sorted]).strip()
+                    current_deductee = combined_name
 
-                # Using simple regex for other header info
-                deductor_match = re.search(r"Name and address of the deductor\n(.*?)\n", header_text)
+                # Using simple regex for other details from Page 1
+                deductor_match = re.search(r"Name and address of the deductor\n(.*?)\n", text1)
                 if deductor_match:
                     current_deductor = deductor_match.group(1).strip()
                 
-                quarter_match = re.search(r"Quarter\s*\n\s*(Q[1-4]|0[1-4])", header_text)
-                quarter = f"Q{quarter_match.group(1).lstrip('0')}" if quarter_match else "N/A"
+                quarter_match = re.search(r"Quarter\s*\n\s*(Q[1-4]|0[1-4])", text1)
+                if quarter_match:
+                    quarter = f"Q{quarter_match.group(1).lstrip('0')}"
 
-                # --- Section B: Find all transactions across ALL pages of this certificate ---
-                all_payments = []
-                all_challans = []
-
-                for page_num in range(start_index, end_index):
-                    page_text = pdf.pages[page_num].extract_text(x_tolerance=2) or ""
-                    
-                    # Using the simple regex from your first script to find numbers
-                    # Pattern: A number with .00, then 194(any letter), then a date
-                    payments_on_page = re.findall(r"(\d+\.\d{2})\s+194\w+\s+(\d{2}-\d{2}-\d{4})", page_text)
-                    all_payments.extend(payments_on_page)
-                    
-                    # Pattern: A number with .00, then a 7-digit BSR code, then a date
-                    challans_on_page = re.findall(r"(\d+\.\d{2})\s+\d{7}\s+(\d{2}-\d{2}-\d{4})", page_text)
-                    all_challans.extend(challans_on_page)
-
-                # --- Section C: Pair up the collected payments and challans ---
-                # This assumes the number of payments matches the number of challans for the certificate.
-                num_transactions = min(len(all_payments), len(all_challans))
-                for j in range(num_transactions):
-                    taxable_val, pay_date = all_payments[j]
-                    tds_val, _ = all_challans[j]
-                    
-                    try:
-                        rate = round((float(tds_val) / float(taxable_val)) * 100, 2) if float(taxable_val) > 0 else 0.0
-                    except (ValueError, ZeroDivisionError):
-                        rate = 0.0
-                    
+                # Find and process transactions on Page 1
+                payments1 = re.findall(r"(\d{2,}\.\d{2})\s+194\w+\s+(\d{2}-\d{2}-\d{4})", text1)
+                challans1 = re.findall(r"(\d{2,}\.\d{2})\s+\d{7}\s+(\d{2}-\d{2}-\d{4})", text1)
+                
+                for j in range(min(len(payments1), len(challans1))):
+                    taxable_val, pay_date = payments1[j]
+                    tds_val, _ = challans1[j]
+                    rate = round((float(tds_val) / float(taxable_val)) * 100, 2) if float(taxable_val) > 0 else 0.0
                     all_records.append({
-                        "Quarter": quarter,
-                        "Date of Deduction": pay_date,
-                        "Deductee Name": current_deductee,
-                        "PAN": current_pan,
-                        "Taxable Value": float(taxable_val),
-                        "Rate (%)": f"{rate:.2f}",
-                        "TDS Amount": float(tds_val),
-                        "Deductor Name": current_deductor
+                        "Quarter": quarter, "Date of Deduction": pay_date, "Deductee Name": current_deductee,
+                        "PAN": current_pan, "Taxable Value": float(taxable_val), "Rate (%)": f"{rate:.2f}",
+                        "TDS Amount": float(tds_val), "Deductor Name": current_deductor
                     })
+
+                # --- PROCESS PAGE 2 (if it exists for this certificate) ---
+                if start_index + 1 < end_index:
+                    page2 = pdf.pages[start_index + 1]
+                    text2 = page2.extract_text() or ""
+                    
+                    payments2 = re.findall(r"(\d{2,}\.\d{2})\s+194\w+\s+(\d{2}-\d{2}-\d{4})", text2)
+                    challans2 = re.findall(r"(\d{2,}\.\d{2})\s+\d{7}\s+(\d{2}-\d{2}-\d{4})", text2)
+                    
+                    # Associate these transactions with the headers found on Page 1
+                    for j in range(min(len(payments2), len(challans2))):
+                        taxable_val, pay_date = payments2[j]
+                        tds_val, _ = challans2[j]
+                        rate = round((float(tds_val) / float(taxable_val)) * 100, 2) if float(taxable_val) > 0 else 0.0
+                        all_records.append({
+                            "Quarter": quarter, "Date of Deduction": pay_date, "Deductee Name": current_deductee,
+                            "PAN": current_pan, "Taxable Value": float(taxable_val), "Rate (%)": f"{rate:.2f}",
+                            "TDS Amount": float(tds_val), "Deductor Name": current_deductor
+                        })
 
     except Exception as e:
         st.error(f"An unexpected error occurred: {e}")
@@ -127,9 +126,9 @@ def extract_data_with_coordinates(pdf_file):
 uploaded_file = st.file_uploader("Upload Merged Form 16A PDF", type="pdf")
 
 if uploaded_file is not None:
-    if st.button("▶️ Extract Using Coordinates"):
-        with st.spinner("Processing PDF with coordinate-based logic..."):
-            extracted_df = extract_data_with_coordinates(uploaded_file)
+    if st.button("▶️ Extract Data"):
+        with st.spinner("Processing with original coordinate logic..."):
+            extracted_df = extract_data_with_original_logic(uploaded_file)
 
         if not extracted_df.empty:
             st.success(f"✅ Extraction Complete! Found {len(extracted_df)} records.")
@@ -148,10 +147,10 @@ if uploaded_file is not None:
             excel_data = convert_df_to_excel(extracted_df)
 
             st.download_button(
-                label="📥 Download Excel",
+                label="📥 Download as Excel File",
                 data=excel_data,
-                file_name="Form16A_Coordinate_Extract.xlsx",
+                file_name="Form16A_Final_Extract.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.warning("Extraction ran but no transaction data was found. The PDF layout might not match the hardcoded coordinates.")
+            st.warning("Extraction ran but no data was found. The PDF layout might not match the hardcoded coordinates and structure.")
