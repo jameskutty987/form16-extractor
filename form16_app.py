@@ -2,119 +2,125 @@ import streamlit as st
 import pdfplumber
 import pandas as pd
 import re
-from io import BytesIO
+import io
 
-st.set_page_config(page_title="Form 16 TDS Extractor", layout="centered")
-
-# Dark UI Styling
-st.markdown("""
+# ==============================
+# Streamlit Page Config
+# ==============================
+st.set_page_config(page_title="Form 16 TDS Extractor", page_icon="📄", layout="wide")
+st.markdown(
+    """
     <style>
-    body, .stApp {
-        background-color: #0f0f0f;
-        color: #00ff88;
-        font-family: 'Segoe UI', sans-serif;
+    body {
+        background-color: #0e1117;
+        color: #00ff99;
     }
-    .stButton>button, .stDownloadButton>button {
-        background-color: #00ff88;
+    .stButton>button {
+        background-color: #00ff99;
         color: black;
         font-weight: bold;
-        border-radius: 8px;
     }
-    footer {visibility: visible;}
-    footer:after {
-        content: 'Published by JamesCurator';
-        display: block;
-        text-align: center;
-        color: gray;
-        padding: 10px;
+    .stDownloadButton>button {
+        background-color: #00ff99;
+        color: black;
+        font-weight: bold;
+    }
+    footer {
+        visibility: hidden;
     }
     </style>
-""", unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True
+)
 
-# Updated title without “Fixed Location Based”
-st.title("📄 Form 16 TDS Data Extractor")
+st.title("Form 16 Merged PDF → Excel Extractor")
+st.markdown("**Upload a merged Form 16 PDF file and get TDS data in Excel**")
 
-uploaded_file = st.file_uploader("Upload merged Form 16 PDF", type="pdf")
+uploaded_file = st.file_uploader("Upload Merged Form 16 PDF", type=["pdf"])
 
-def extract_form16_data(pdf_file):
-    rows = []
-    with pdfplumber.open(pdf_file) as pdf:
-        for page_num in range(0, len(pdf.pages), 3):
-            page = pdf.pages[page_num]
-            words = page.extract_words()
-            text = page.extract_text()
-            if not text:
-                continue
+if uploaded_file:
+    run_process = st.button("Run Extraction")
+    if run_process:
+        with pdfplumber.open(uploaded_file) as pdf:
+            data_rows = []
 
-            current_pan = "Unknown"
-            current_deductee = "Unknown"
-            current_deductor = "Unknown"
+            # Process in 3-page blocks
+            for start in range(0, len(pdf.pages), 3):
+                page1 = pdf.pages[start]
+                page2 = pdf.pages[start + 1] if start + 1 < len(pdf.pages) else None
 
-            # Extract PAN using fixed coordinate + pattern
-            for w in words:
-                if 265 < w["top"] < 275 and 455 < w["x0"] < 510 and re.fullmatch(r"[A-Z]{5}[0-9]{4}[A-Z]", w["text"]):
-                    current_pan = w["text"]
-                    break
+                text1 = page1.extract_text().splitlines()
+                text2 = page2.extract_text().splitlines() if page2 else []
 
-            # Extract Deductee Name from top≈185–195 and x0≈300–540
-            name_band = [
-                w for w in words if 185 < w["top"] < 195 and 300 < w["x0"] < 540
-            ]
-            name_band_sorted = sorted(name_band, key=lambda x: x["x0"])
-            combined = " ".join([w["text"] for w in name_band_sorted]).strip()
-            current_deductee = combined[:40] if combined else "Unknown"
+                # Deductee Name
+                deductee_name = ""
+                for i, line in enumerate(text1):
+                    if "Name and address of the deductee" in line:
+                        deductee_name = text1[i + 1].strip()
+                        break
 
-            # Extract Deductor Name from below heading
-            for i, line in enumerate(text.splitlines()):
-                if "Name and address of the deductor" in line:
-                    for j in range(i + 1, len(text.splitlines())):
-                        val = text.splitlines()[j].strip()
-                        if val:
-                            current_deductor = val
-                            break
+                # PAN of Deductee
+                pan_number = ""
+                for i, line in enumerate(text1):
+                    if "PAN of the deductee" in line:
+                        candidate = text1[i + 1].strip()
+                        if re.fullmatch(r"[A-Z]{5}[0-9]{4}[A-Z]", candidate):
+                            pan_number = candidate
+                        break
 
-            # Extract Quarter
-            match = re.search(r"Summary of tax deducted.*?\nQ([1-4])", text, re.DOTALL)
-            quarter = f"Q{match.group(1)}" if match else "Unknown"
+                # Deductor Name
+                deductor_name = ""
+                for i, line in enumerate(text1):
+                    if "Name and address of the deductor" in line:
+                        deductor_name = text1[i + 1].strip()
+                        break
 
-            # Extract TDS payment and challan details
-            payments = re.findall(r"(\d{4,6}\.\d{2})\s+194\w+\s+(\d{2}-\d{2}-\d{4})", text)
-            challans = re.findall(r"(\d{3,5}\.\d{2})\s+051\d+\s+(\d{2}-\d{2}-\d{4})", text)
+                # Quarter
+                quarter = ""
+                for line in text1:
+                    if re.search(r"Quarter\s*[:\-]?\s*(Q[1-4])", line, re.IGNORECASE):
+                        quarter = re.search(r"(Q[1-4])", line, re.IGNORECASE).group(1)
+                        break
 
-            for i in range(min(len(payments), len(challans))):
-                taxable_val, pay_date = payments[i]
-                tds_val, tds_date = challans[i]
-                try:
-                    rate = round((float(tds_val) / float(taxable_val)) * 100, 2)
-                except:
-                    rate = 0.0
+                # Function to extract TDS rows from a page
+                def extract_tds_rows(lines):
+                    tds_entries = []
+                    for line in lines:
+                        # Match: Date | Taxable Value | Rate% | TDS Amount
+                        match = re.match(r"(\d{2}-\d{2}-\d{4})\s+([\d,]+\.\d{2})\s+([\d\.]+)\s+([\d,]+\.\d{2})", line)
+                        if match:
+                            date = match.group(1)
+                            taxable_value = match.group(2).replace(",", "")
+                            rate = match.group(3)
+                            tds_amount = match.group(4).replace(",", "")
+                            tds_entries.append((date, taxable_value, rate, tds_amount))
+                    return tds_entries
 
-                rows.append({
-                    "Quarter": quarter,
-                    "Date of Deduction": pay_date,
-                    "Deductee Name": current_deductee,
-                    "PAN": current_pan,
-                    "Taxable Value": taxable_val,
-                    "Rate (%)": f"{rate:.2f}",
-                    "TDS Amount": tds_val,
-                    "Deductor Name": current_deductor
-                })
+                # Combine TDS from page 1 and page 2
+                tds_rows = extract_tds_rows(text1) + extract_tds_rows(text2)
 
-    return pd.DataFrame(rows)
+                for row in tds_rows:
+                    data_rows.append({
+                        "Quarter": quarter,
+                        "Date of Deduction": row[0],
+                        "Deductee Name": deductee_name,
+                        "PAN": pan_number,
+                        "Taxable Value": row[1],
+                        "Rate (%)": row[2],
+                        "TDS Amount": row[3],
+                        "Deductor Name": deductor_name
+                    })
 
-# App logic
-if uploaded_file and st.button("▶️ Extract"):
-    with st.spinner("Extracting data..."):
-        df = extract_form16_data(uploaded_file)
+        if data_rows:
+            df = pd.DataFrame(data_rows)
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False)
+            st.success("✅ Extraction complete!")
+            st.dataframe(df)
+            st.download_button("Download Excel", data=output.getvalue(), file_name="tds_data.xlsx")
 
-    if df.empty:
-        st.error("❌ No TDS data found.")
-    else:
-        df = df[["Quarter", "Date of Deduction", "Deductee Name", "PAN", "Taxable Value", "Rate (%)", "TDS Amount", "Deductor Name"]]
-        st.success("✅ Extraction Complete. Preview Below:")
-        st.dataframe(df)
+        else:
+            st.error("No valid TDS data found in your file.")
 
-        # Download Excel
-        buffer = BytesIO()
-        df.to_excel(buffer, index=False)
-        st.download_button("📥 Download Excel", buffer.getvalue(), "Form16_TDS_Extracted.xlsx")
+st.markdown("<hr><p style='text-align:center; color:gray;'>Published by JamesCurator</p>", unsafe_allow_html=True)
