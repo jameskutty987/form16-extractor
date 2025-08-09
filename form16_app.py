@@ -39,10 +39,9 @@ def extract_form16_data(pdf_file):
     rows = []
     with pdfplumber.open(pdf_file) as pdf:
         total_pages = len(pdf.pages)
-
-        for start_page in range(0, total_pages, 3):
-            # ========== PAGE 1 ==========
-            page1 = pdf.pages[start_page]
+        for page_num in range(0, total_pages, 3):
+            # ---------------------- PAGE 1 ----------------------
+            page1 = pdf.pages[page_num]
             words1 = page1.extract_words()
             text1 = page1.extract_text() or ""
 
@@ -50,21 +49,19 @@ def extract_form16_data(pdf_file):
             current_deductee = "Unknown"
             current_deductor = "Unknown"
 
-            # PAN
+            # PAN from coordinates
             for w in words1:
                 if 265 < w["top"] < 275 and 455 < w["x0"] < 510 and re.fullmatch(r"[A-Z]{5}[0-9]{4}[A-Z]", w["text"]):
                     current_pan = w["text"]
                     break
 
-            # Deductee Name
-            name_band = [
-                w for w in words1 if 185 < w["top"] < 195 and 300 < w["x0"] < 540
-            ]
+            # Deductee Name from coordinates
+            name_band = [w for w in words1 if 185 < w["top"] < 195 and 300 < w["x0"] < 540]
             name_band_sorted = sorted(name_band, key=lambda x: x["x0"])
             combined = " ".join([w["text"] for w in name_band_sorted]).strip()
             current_deductee = combined[:40] if combined else "Unknown"
 
-            # Deductor Name
+            # Deductor Name from text
             for i, line in enumerate(text1.splitlines()):
                 if "Name and address of the deductor" in line:
                     for j in range(i + 1, len(text1.splitlines())):
@@ -77,7 +74,7 @@ def extract_form16_data(pdf_file):
             match = re.search(r"Summary of tax deducted.*?\nQ([1-4])", text1, re.DOTALL)
             quarter = f"Q{match.group(1)}" if match else "Unknown"
 
-            # TDS Table (Page 1)
+            # Payments & Challans
             payments = re.findall(r"(\d{4,6}\.\d{2})\s+194\w+\s+(\d{2}-\d{2}-\d{4})", text1)
             challans = re.findall(r"(\d{3,5}\.\d{2})\s+051\d+\s+(\d{2}-\d{2}-\d{4})", text1)
 
@@ -99,42 +96,26 @@ def extract_form16_data(pdf_file):
                     "Deductor Name": current_deductor
                 })
 
-            # ========== PAGE 2 ==========
-            if start_page + 1 < total_pages:
-                page2 = pdf.pages[start_page + 1]
+            # ---------------------- PAGE 2 ----------------------
+            if page_num + 1 < total_pages:
+                page2 = pdf.pages[page_num + 1]
                 words2 = page2.extract_words()
 
-                # Filter numbers likely in TDS column (based on coords from your sample)
-                tds_entries = [
-                    w for w in words2 if 300 < w["top"] < 700 and 400 < w["x0"] < 480 and re.match(r"\d+\.\d{2}", w["text"])
-                ]
-                date_entries = [
-                    w for w in words2 if 300 < w["top"] < 700 and 250 < w["x0"] < 350 and re.match(r"\d{2}-\d{2}-\d{4}", w["text"])
-                ]
-                taxable_entries = [
-                    w for w in words2 if 300 < w["top"] < 700 and 150 < w["x0"] < 250 and re.match(r"\d+\.\d{2}", w["text"])
-                ]
+                # Filter TDS amounts by coordinates (x0 ~ 75-90, top ~ 130-300)
+                tds_entries = [w for w in words2 if 75 < w["x0"] < 90 and 130 < w["top"] < 300 and re.fullmatch(r"\d+\.\d{2}", w["text"])]
 
-                # Sort vertically by `top` to keep rows aligned
-                tds_entries.sort(key=lambda x: x["top"])
-                date_entries.sort(key=lambda x: x["top"])
-                taxable_entries.sort(key=lambda x: x["top"])
-
-                for i in range(min(len(tds_entries), len(date_entries), len(taxable_entries))):
-                    tds_val = tds_entries[i]["text"]
-                    pay_date = date_entries[i]["text"]
-                    taxable_val = taxable_entries[i]["text"]
-                    try:
-                        rate = round((float(tds_val) / float(taxable_val)) * 100, 2)
-                    except:
-                        rate = 0.0
+                for w in tds_entries:
+                    tds_val = w["text"]
+                    taxable_val = "0.00"  # No taxable value on page 2, can be blank or calc if needed
+                    pay_date = "Unknown"  # Page 2 may not have direct date; could be matched if found nearby
+                    rate = "0.00"
                     rows.append({
                         "Quarter": quarter,
                         "Date of Deduction": pay_date,
                         "Deductee Name": current_deductee,
                         "PAN": current_pan,
                         "Taxable Value": taxable_val,
-                        "Rate (%)": f"{rate:.2f}",
+                        "Rate (%)": rate,
                         "TDS Amount": tds_val,
                         "Deductor Name": current_deductor
                     })
