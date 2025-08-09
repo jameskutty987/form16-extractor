@@ -38,31 +38,30 @@ uploaded_file = st.file_uploader("Upload merged Form 16 PDF", type="pdf")
 def extract_form16_data(pdf_file):
     rows = []
     with pdfplumber.open(pdf_file) as pdf:
-        for base_page in range(0, len(pdf.pages), 3):  
-            # ----------------------
-            # PAGE 1 Extraction
-            # ----------------------
+        for base_page in range(0, len(pdf.pages), 3):
+
+            # ----------- PAGE 1 -----------
             page1 = pdf.pages[base_page]
             words1 = page1.extract_words()
-            text1 = page1.extract_text()
+            text1 = page1.extract_text() or ""
 
             current_pan = "Unknown"
             current_deductee = "Unknown"
             current_deductor = "Unknown"
 
-            # PAN detection
+            # PAN from Page 1 coordinates
             for w in words1:
                 if 265 < w["top"] < 275 and 455 < w["x0"] < 510 and re.fullmatch(r"[A-Z]{5}[0-9]{4}[A-Z]", w["text"]):
                     current_pan = w["text"]
                     break
 
-            # Deductee Name
+            # Deductee Name from Page 1
             name_band = [w for w in words1 if 185 < w["top"] < 195 and 300 < w["x0"] < 540]
             name_band_sorted = sorted(name_band, key=lambda x: x["x0"])
-            combined_name = " ".join([w["text"] for w in name_band_sorted]).strip()
-            current_deductee = combined_name if combined_name else "Unknown"
+            combined = " ".join([w["text"] for w in name_band_sorted]).strip()
+            current_deductee = combined[:40] if combined else "Unknown"
 
-            # Deductor Name
+            # Deductor Name from Page 1
             for i, line in enumerate(text1.splitlines()):
                 if "Name and address of the deductor" in line:
                     for j in range(i + 1, len(text1.splitlines())):
@@ -71,11 +70,11 @@ def extract_form16_data(pdf_file):
                             current_deductor = val
                             break
 
-            # Quarter
+            # Quarter from Page 1
             match = re.search(r"Summary of tax deducted.*?\nQ([1-4])", text1, re.DOTALL)
             quarter = f"Q{match.group(1)}" if match else "Unknown"
 
-            # Payments & Challans (Page 1)
+            # Extract TDS & Taxable from Page 1 text
             payments1 = re.findall(r"(\d{4,6}\.\d{2})\s+194\w+\s+(\d{2}-\d{2}-\d{4})", text1)
             challans1 = re.findall(r"(\d{3,5}\.\d{2})\s+051\d+\s+(\d{2}-\d{2}-\d{4})", text1)
 
@@ -97,37 +96,35 @@ def extract_form16_data(pdf_file):
                     "Deductor Name": current_deductor
                 })
 
-            # ----------------------
-            # PAGE 2 Extraction (extra deductions)
-            # ----------------------
+            # ----------- PAGE 2 -----------
             if base_page + 1 < len(pdf.pages):
                 page2 = pdf.pages[base_page + 1]
-                words2 = page2.extract_words()
+                text2 = page2.extract_text() or ""
 
-                # Coordinates from analysis for Taxable Value (left col) & TDS Amount (right col)
-                taxable_values = [w["text"] for w in words2 if 395 < w["top"] < 470 and 100 < w["x0"] < 200 and re.match(r"^\d+\.\d{2}$", w["text"])]
-                tds_amounts = [w["text"] for w in words2 if 395 < w["top"] < 470 and 400 < w["x0"] < 500 and re.match(r"^\d+\.\d{2}$", w["text"])]
+                # Extract from Page 2 only if numbers exist
+                payments2 = re.findall(r"(\d{4,6}\.\d{2})\s+194\w+\s+(\d{2}-\d{2}-\d{4})", text2)
+                challans2 = re.findall(r"(\d{3,5}\.\d{2})\s+051\d+\s+(\d{2}-\d{2}-\d{4})", text2)
 
-                # If lengths match, pair them; else skip mismatches
-                for i in range(min(len(taxable_values), len(tds_amounts))):
-                    taxable_val = taxable_values[i]
-                    tds_val = tds_amounts[i]
+                for i in range(min(len(payments2), len(challans2))):
+                    taxable_val, pay_date = payments2[i]
+                    tds_val, _ = challans2[i]
                     try:
                         rate = round((float(tds_val) / float(taxable_val)) * 100, 2)
                     except:
                         rate = 0.0
                     rows.append({
                         "Quarter": quarter,
-                        "Date of Deduction": "Unknown",
-                        "Deductee Name": current_deductee,
-                        "PAN": current_pan,
+                        "Date of Deduction": pay_date,
+                        "Deductee Name": current_deductee,  # From page 1
+                        "PAN": current_pan,  # From page 1
                         "Taxable Value": taxable_val,
                         "Rate (%)": f"{rate:.2f}",
                         "TDS Amount": tds_val,
-                        "Deductor Name": current_deductor
+                        "Deductor Name": current_deductor  # From page 1
                     })
 
     return pd.DataFrame(rows)
+
 
 # App logic
 if uploaded_file and st.button("▶️ Extract"):
@@ -137,10 +134,13 @@ if uploaded_file and st.button("▶️ Extract"):
     if df.empty:
         st.error("❌ No TDS data found.")
     else:
-        df = df[["Quarter", "Date of Deduction", "Deductee Name", "PAN", "Taxable Value", "Rate (%)", "TDS Amount", "Deductor Name"]]
+        df = df[["Quarter", "Date of Deduction", "Deductee Name", "PAN",
+                 "Taxable Value", "Rate (%)", "TDS Amount", "Deductor Name"]]
         st.success("✅ Extraction Complete. Preview Below:")
         st.dataframe(df)
 
         buffer = BytesIO()
         df.to_excel(buffer, index=False)
-        st.download_button("📥 Download Excel", buffer.getvalue(), "Form16_TDS_Extracted.xlsx")
+        st.download_button("📥 Download Excel",
+                           buffer.getvalue(),
+                           "Form16_TDS_Extracted.xlsx")
